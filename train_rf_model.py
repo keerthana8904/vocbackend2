@@ -1,112 +1,130 @@
 # ------------------------------------------------------
-# train_rf_model_simple.py  ✅ (4-feature model for ESP32 + Flask backend)
+# voc_nn_train.py — Neural Network Model for VOC Prediction
 # ------------------------------------------------------
+
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, RandomizedSearchCV
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, accuracy_score
-from scipy.stats import randint
-import joblib
 import os
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.metrics import (
+    classification_report,
+    accuracy_score,
+    confusion_matrix,
+    roc_auc_score,
+)
+import tensorflow as tf
+from tensorflow.keras import layers, models
+import joblib
+import matplotlib.pyplot as plt
 
 # ------------------------------------------------------
-# 1. Synthetic Dataset Creation
+# 1. Load Dataset
 # ------------------------------------------------------
-np.random.seed(42)
+df = pd.read_csv("data/synthetic_voc_dataset.csv")
+print("✅ Dataset loaded:", df.shape)
 
-n = 5000
-labels = ['healthy', 'asthma', 'copd', 'covid19', 'pneumonia', 'lung_cancer']
-samples_per_class = n // len(labels)
-data = []
-
-for label in labels:
-    if label == 'healthy':
-        mq2 = np.random.normal(900, 100, samples_per_class)
-        mq3 = np.random.normal(2900, 150, samples_per_class)
-        mq135 = np.random.normal(950, 80, samples_per_class)
-        temp = np.random.normal(28, 1.2, samples_per_class)
-    elif label == 'asthma':
-        mq2 = np.random.normal(1200, 150, samples_per_class)
-        mq3 = np.random.normal(3100, 120, samples_per_class)
-        mq135 = np.random.normal(1600, 150, samples_per_class)
-        temp = np.random.normal(29, 1.0, samples_per_class)
-    elif label == 'copd':
-        mq2 = np.random.normal(1400, 150, samples_per_class)
-        mq3 = np.random.normal(3200, 130, samples_per_class)
-        mq135 = np.random.normal(1800, 180, samples_per_class)
-        temp = np.random.normal(29.5, 1.2, samples_per_class)
-    elif label == 'covid19':
-        mq2 = np.random.normal(1000, 120, samples_per_class)
-        mq3 = np.random.normal(2800, 150, samples_per_class)
-        mq135 = np.random.normal(1500, 100, samples_per_class)
-        temp = np.random.normal(30, 1.0, samples_per_class)
-    elif label == 'pneumonia':
-        mq2 = np.random.normal(1600, 150, samples_per_class)
-        mq3 = np.random.normal(3400, 100, samples_per_class)
-        mq135 = np.random.normal(2000, 200, samples_per_class)
-        temp = np.random.normal(30.5, 1.0, samples_per_class)
-    elif label == 'lung_cancer':
-        mq2 = np.random.normal(1800, 200, samples_per_class)
-        mq3 = np.random.normal(3500, 100, samples_per_class)
-        mq135 = np.random.normal(2200, 150, samples_per_class)
-        temp = np.random.normal(31, 1.0, samples_per_class)
-
-    for i in range(samples_per_class):
-        data.append([mq2[i], mq3[i], mq135[i], temp[i], label])
-
-df = pd.DataFrame(data, columns=["mq2_adc", "mq3_adc", "mq135_adc", "temp_c", "label"])
-os.makedirs("data", exist_ok=True)
-df.to_csv("data/synthetic_voc_dataset.csv", index=False)
-print("✅ Dataset saved as data/synthetic_voc_dataset.csv")
-
-# ------------------------------------------------------
-# 2. Train-Test Split
-# ------------------------------------------------------
 X = df.drop(columns=["label"])
 y = df["label"]
 
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42, stratify=y
-)
+# Encode string labels into integers
+le = LabelEncoder()
+y_encoded = le.fit_transform(y)
 
-# ------------------------------------------------------
-# 3. Model Training (RandomizedSearchCV)
-# ------------------------------------------------------
-param_dist = {
-    "n_estimators": randint(100, 400),
-    "max_depth": [None, 10, 20, 30],
-    "min_samples_split": randint(2, 10),
-    "min_samples_leaf": randint(1, 5),
-    "bootstrap": [True, False]
-}
-
-rf = RandomForestClassifier(random_state=42)
-search = RandomizedSearchCV(
-    rf,
-    param_distributions=param_dist,
-    n_iter=20,
-    cv=5,
-    scoring="accuracy",
-    n_jobs=-1,
-    verbose=1,
-    random_state=42
-)
-
-search.fit(X_train, y_train)
-best_model = search.best_estimator_
-print("\n🌟 Best Params:", search.best_params_)
-
-# ------------------------------------------------------
-# 4. Evaluate Model
-# ------------------------------------------------------
-y_pred = best_model.predict(X_test)
-print("\n✅ Test Accuracy:", round(accuracy_score(y_test, y_pred), 3))
-print("\n📊 Classification Report:\n", classification_report(y_test, y_pred))
-
-# ------------------------------------------------------
-# 5. Save Model
-# ------------------------------------------------------
+# Save encoder for backend decoding
 os.makedirs("model", exist_ok=True)
-joblib.dump(best_model, "model/voc_random_forest_model.pkl")
-print("\n💾 Model saved as model/voc_random_forest_model.pkl")
+joblib.dump(le, "model/label_encoder.pkl")
+
+# ------------------------------------------------------
+# 2. Split Data (80/20)
+# ------------------------------------------------------
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
+)
+
+# ------------------------------------------------------
+# 3. Scale Inputs
+# ------------------------------------------------------
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+joblib.dump(scaler, "model/voc_scaler.pkl")
+
+# ------------------------------------------------------
+# 4. Build Neural Network Model
+# ------------------------------------------------------
+num_features = X_train.shape[1]
+num_classes = len(np.unique(y_encoded))
+
+model = models.Sequential([
+    layers.Dense(64, activation='relu', input_shape=(num_features,)),
+    layers.Dropout(0.3),
+    layers.Dense(32, activation='relu'),
+    layers.Dropout(0.2),
+    layers.Dense(num_classes, activation='softmax')
+])
+
+model.compile(
+    optimizer='adam',
+    loss='sparse_categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+model.summary()
+
+# ------------------------------------------------------
+# 5. Train Model
+# ------------------------------------------------------
+history = model.fit(
+    X_train_scaled, y_train,
+    epochs=50,
+    batch_size=32,
+    validation_split=0.1,
+    verbose=1
+)
+
+# ------------------------------------------------------
+# 6. Evaluate
+# ------------------------------------------------------
+y_pred_probs = model.predict(X_test_scaled)
+y_pred = np.argmax(y_pred_probs, axis=1)
+
+acc = accuracy_score(y_test, y_pred)
+print(f"\n✅ Test Accuracy: {acc:.4f}")
+
+print("\n📊 Classification Report:")
+print(classification_report(y_test, y_pred, target_names=le.classes_))
+
+print("\n🧩 Confusion Matrix:")
+print(confusion_matrix(y_test, y_pred))
+
+try:
+    roc_auc = roc_auc_score(tf.keras.utils.to_categorical(y_test), y_pred_probs)
+    print(f"\n🔥 ROC-AUC: {roc_auc:.4f}")
+except Exception:
+    pass
+
+# ------------------------------------------------------
+# 7. Save Model
+# ------------------------------------------------------
+model.save("model/voc_nn_model.h5")
+print("\n💾 Saved model to model/voc_nn_model.h5")
+
+# ------------------------------------------------------
+# 8. Plot training progress (optional)
+# ------------------------------------------------------
+plt.figure(figsize=(10, 4))
+plt.subplot(1, 2, 1)
+plt.plot(history.history["accuracy"], label="train")
+plt.plot(history.history["val_accuracy"], label="val")
+plt.title("Accuracy")
+plt.legend()
+
+plt.subplot(1, 2, 2)
+plt.plot(history.history["loss"], label="train")
+plt.plot(history.history["val_loss"], label="val")
+plt.title("Loss")
+plt.legend()
+plt.tight_layout()
+plt.savefig("model/training_curve.png")
+plt.show()

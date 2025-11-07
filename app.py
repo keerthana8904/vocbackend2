@@ -10,6 +10,8 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from io import BytesIO
 from flask import send_file
+from tensorflow.keras.models import load_model
+import joblib
 # -------------------------------------------------------------
 # Load environment
 # -------------------------------------------------------------
@@ -33,12 +35,19 @@ sensor_collection = db["sensor_data"]
 # -------------------------------------------------------------
 # Load trained ML model
 # -------------------------------------------------------------
+
+MODEL_PATH = os.getenv("MODEL_PATH", "model/voc_nn_model.h5")
+SCALER_PATH = os.getenv("SCALER_PATH", "model/voc_scaler.pkl")
+ENCODER_PATH = os.getenv("ENCODER_PATH", "model/label_encoder.pkl")
+
 try:
-    model = joblib.load(MODEL_PATH)
-    print(f"✅ Model loaded successfully: {MODEL_PATH}")
+    model = load_model(MODEL_PATH)
+    scaler = joblib.load(SCALER_PATH)
+    label_encoder = joblib.load(ENCODER_PATH)
+    print(f"✅ Neural Network model loaded successfully: {MODEL_PATH}")
 except Exception as e:
     print(f"❌ Model load error: {e}")
-    model = None
+    model, scaler, label_encoder = None, None, None
 
 
 # -------------------------------------------------------------
@@ -72,24 +81,36 @@ def token_required(f):
 # -------------------------------------------------------------
 # Disease Prediction Function
 # -------------------------------------------------------------
+# app.py
 def predict_disease(mq2, mq3, mq135, temp, r0_mq2, r0_mq3, r0_mq135):
-    if model is None:
+    if model is None or scaler is None or label_encoder is None:
         return {"prediction": "model_not_loaded"}
 
-    # Normalize using R₀ values
-    mq2_ratio = mq2 / r0_mq2 if r0_mq2 > 0 else mq2
-    mq3_ratio = mq3 / r0_mq3 if r0_mq3 > 0 else mq3
-    mq135_ratio = mq135 / r0_mq135 if r0_mq135 > 0 else mq135
+    # Create feature vector
+    features = np.array([[mq2, mq3, mq135, temp]])
 
-    features = np.array([[mq2_ratio, mq3_ratio, mq135_ratio, temp]])
-    pred = model.predict(features)[0]
-    probs = model.predict_proba(features)[0]
-    labels = model.classes_
+    features = np.nan_to_num(np.array([[mq2, mq3, mq135, temp]]))
 
-    probs_dict = {labels[i]: round(float(probs[i]), 3) for i in range(len(labels))}
+    # Scale the features (same as training)
+    scaled_features = scaler.transform(features)
+
+    # Predict probabilities
+    probs = model.predict(scaled_features)[0]
+
+    # Decode prediction
+    pred_idx = np.argmax(probs)
+    pred_label = label_encoder.inverse_transform([pred_idx])[0]
+
+    # Prepare output
+    probs_dict = {label_encoder.classes_[i]: round(float(probs[i] * 100), 2) for i in range(len(probs))}
+
     risk_score = round(float(np.max(probs) * 100), 2)
 
-    return {"prediction": pred, "probabilities": probs_dict, "risk_score": risk_score}
+    return {
+        "prediction": pred_label,
+        "probabilities": probs_dict,
+        "risk_score": risk_score
+    }
 
 
 # -------------------------------------------------------------
